@@ -1,0 +1,12 @@
+[package]
+name = "centrex_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking"] }
+tar = "0.4"
+xz2 = "0.1"
+flate2 = "1.0"
+elb = "0.1"
+roxmltree = "0.20"
