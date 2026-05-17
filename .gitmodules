@@ -1,0 +1,3 @@
+[submodule "cxp"]
+	path = cxp
+	url = git@github.com:centrexos/cxp.git
