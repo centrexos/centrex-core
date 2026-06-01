@@ -5,49 +5,89 @@ use flate2::read::GzDecoder;
 use roxmltree::Document;
 use elb::{DynamicTag, Elf, ElfPatcher};
 
-#[allow(dead_code)]
 pub struct PackagingEngine {
-    store_root: PathBuf,
+    pub store_root: PathBuf,
 }
 
-#[allow(dead_code)]
 impl PackagingEngine {
     pub fn new(store_path: &str) -> Self {
         Self { store_root: PathBuf::from(store_path) }
     }
 
-    pub fn parse_dnf_metadata(&self, gzip_xml_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Analyzing metadata streams...");
+    /// Parse DNF/RPM repomd primary.xml.gz to extract package metadata.
+    pub fn parse_dnf_metadata(&self, gzip_xml_path: &Path) -> Result<Vec<RepoPackage>, Box<dyn std::error::Error>> {
+        log::debug!("Parsing DNF metadata: {:?}", gzip_xml_path);
+
         let compressed_file = File::open(gzip_xml_path)?;
         let mut decoder = GzDecoder::new(compressed_file);
         let mut xml_content = String::new();
         decoder.read_to_string(&mut xml_content)?;
 
         let doc = Document::parse(&xml_content)?;
-        for package in doc.descendants().filter(|n| n.has_tag_name("package")) {
-            let name = package.descendants().find(|n| n.has_tag_name("name")).map(|n| n.text().unwrap_or("unknown")).unwrap_or("unknown");
-            let arch = package.descendants().find(|n| n.has_tag_name("arch")).map(|n| n.text().unwrap_or("")).unwrap_or("");
+        let mut packages = Vec::new();
 
-            if arch == "x86_64" {
-                println!("Mapped index vector configuration entry -> [{}]", name);
+        for node in doc.descendants().filter(|n| n.has_tag_name("package")) {
+            let name = node.descendants()
+                .find(|n| n.has_tag_name("name"))
+                .and_then(|n| n.text())
+                .unwrap_or("")
+                .to_string();
+
+            let arch = node.descendants()
+                .find(|n| n.has_tag_name("arch"))
+                .and_then(|n| n.text())
+                .unwrap_or("")
+                .to_string();
+
+            let version = node.descendants()
+                .find(|n| n.has_tag_name("version"))
+                .and_then(|n| n.attribute("ver"))
+                .unwrap_or("")
+                .to_string();
+
+            let summary = node.descendants()
+                .find(|n| n.has_tag_name("summary"))
+                .and_then(|n| n.text())
+                .unwrap_or("")
+                .to_string();
+
+            if arch == "x86_64" || arch == "noarch" {
+                log::debug!("Found package: {} {}", name, version);
+                packages.push(RepoPackage { name, version, arch, summary });
             }
         }
-        Ok(())
+
+        log::info!("Parsed {} packages from DNF metadata", packages.len());
+        Ok(packages)
     }
 
-    pub fn target_rpath_injection(&self, binary_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Recalibrating binary search parameters: {:?}", binary_path);
+    /// Patch the RPATH/RUNPATH of an ELF binary to use Centrex store library paths.
+    pub fn patch_rpath(&self, binary_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        log::debug!("Patching RPATH: {:?}", binary_path);
+
         let mut file = OpenOptions::new().read(true).write(true).open(binary_path)?;
-        
         let elf = Elf::read(&mut file, 4096)?;
         let mut patcher = ElfPatcher::new(elf, file);
 
-        let custom_rpath = "$ORIGIN/../lib:$ORIGIN/../lib64:/lib64:/lib:/usr/lib";
-        let rpath_cstring = std::ffi::CString::new(custom_rpath)?;
-        patcher.set_library_search_path(DynamicTag::Runpath, &*rpath_cstring)?;
+        // Prefer $ORIGIN-relative paths so the binary is relocatable within the store.
+        let rpath = format!(
+            "$ORIGIN/../lib:$ORIGIN/../lib64:{}:{}:/lib64:/lib:/usr/lib",
+            self.store_root.join("lib").display(),
+            self.store_root.join("lib64").display(),
+        );
+        let rpath_cstr = std::ffi::CString::new(rpath.as_str())?;
+        patcher.set_library_search_path(DynamicTag::Runpath, &*rpath_cstr)?;
         patcher.finish()?;
 
-        println!("Dynamic linking optimization vectors complete.");
+        log::info!("RPATH patched: {:?}", binary_path);
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub struct RepoPackage {
+    pub name: String,
+    pub version: String,
+    pub arch: String,
+    pub summary: String,
 }

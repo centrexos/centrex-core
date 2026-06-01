@@ -13,47 +13,75 @@ impl CoreBootstrapper {
         Self { target_root: PathBuf::from(target_path) }
     }
 
-    // Unpacks a pre-existing rootfs file from the local file system
     pub fn extract_local_rootfs(&self, archive_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new(archive_path);
         if !path.exists() {
-            return Err(format!("Local rootfs archive not found at: {}", archive_path).into());
+            return Err(format!("rootfs archive not found: {}", archive_path).into());
         }
 
-        println!("Reading local rootfs archive: {}", archive_path);
-        let archive_file = File::open(path)?;
-        
-        println!("Generating localized runtime layout: {:?}", self.target_root);
+        log::info!("Extracting rootfs: {}", archive_path);
         fs::create_dir_all(&self.target_root)?;
 
-        println!("Inflating local .tar.xz filesystem matrix (This might take a minute)...");
+        let archive_file = File::open(path)?;
+        log::debug!("Decompressing .tar.xz — this may take a moment");
         let xz_decoder = XzDecoder::new(archive_file);
         let mut archive = Archive::new(xz_decoder);
-
-        // Standard tar extraction preserving file permissions
         archive.unpack(&self.target_root)?;
+
+        log::info!("Rootfs extracted to: {:?}", self.target_root);
         Ok(())
     }
 
     pub fn finalize_core_layout(&self) -> io::Result<()> {
-        println!("Isolating base file configurations from external software channels...");
-        
-        // Wipe Fedora's native package manager tracking structures to guarantee exclusive control
-        let dnf_binary = self.target_root.join("usr/bin/dnf");
-        if dnf_binary.exists() { let _ = fs::remove_file(dnf_binary); }
-        let rpm_binary = self.target_root.join("usr/bin/rpm");
-        if rpm_binary.exists() { let _ = fs::remove_file(rpm_binary); }
+        log::info!("Finalizing Centrex core layout");
 
-        let os_release_path = self.target_root.join("etc/os-release");
-        let custom_metadata = br#"NAME="BespokeFedoraCoreOS"
-            ID=bespokefedoracoreos
-            PRETTY_NAME="Bespoke OS (Fedora Core + Rust Engine)"
-            "#;
-        fs::write(os_release_path, custom_metadata)?;
+        self.write_os_release()?;
+        self.create_centrex_dirs()?;
+        self.disable_foreign_package_managers()?;
 
-        let store_path = self.target_root.join("opt/distro_store");
-        fs::create_dir_all(store_path)?;
+        log::info!("Core layout finalized");
+        Ok(())
+    }
 
+    fn write_os_release(&self) -> io::Result<()> {
+        let os_release = self.target_root.join("etc/os-release");
+        let content = r#"NAME="CentrexOS"
+ID=centrexos
+PRETTY_NAME="CentrexOS (Early Development)"
+VERSION="0.1.0"
+VERSION_ID="0.1.0"
+HOME_URL="https://centrexos.org"
+SUPPORT_URL="https://github.com/centrexos"
+BUG_REPORT_URL="https://github.com/centrexos/centrexos/issues"
+"#;
+        fs::write(os_release, content)?;
+        log::debug!("Wrote /etc/os-release");
+        Ok(())
+    }
+
+    fn create_centrex_dirs(&self) -> io::Result<()> {
+        for dir in &[
+            "opt/centrex_store",
+            "etc/cxpkg",
+            "var/cache/cxpkg",
+            "var/lib/cxpkg",
+        ] {
+            fs::create_dir_all(self.target_root.join(dir))?;
+            log::debug!("Created dir: {}", dir);
+        }
+        Ok(())
+    }
+
+    fn disable_foreign_package_managers(&self) -> io::Result<()> {
+        // Remove native package manager binaries to ensure cxpkg is the sole package interface.
+        // This prevents accidental direct use of the underlying backend tools by end users.
+        for bin in &["usr/bin/dnf", "usr/bin/rpm", "usr/bin/apt", "usr/bin/apt-get"] {
+            let full = self.target_root.join(bin);
+            if full.exists() {
+                fs::remove_file(&full)?;
+                log::debug!("Removed foreign binary: {}", bin);
+            }
+        }
         Ok(())
     }
 }
