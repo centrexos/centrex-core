@@ -1,3 +1,4 @@
+mod api;
 mod bootstrapper;
 mod translator;
 
@@ -12,22 +13,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: centrex-core <path_to_rootfs.tar.xz>");
-        eprintln!("       centrex-core --status");
+        eprintln!("Usage:");
+        eprintln!("  centrex-core <rootfs.tar.xz>         Deploy core rootfs from archive");
+        eprintln!("  centrex-core --status                Show system status");
+        eprintln!("  centrex-core --daemon                Start privileged API daemon (root)");
+        eprintln!("  centrex-core --api-call '<json>'     Send a call to the running daemon");
         process::exit(1);
     }
 
-    if args[1] == "--status" {
-        return cmd_status();
+    match args[1].as_str() {
+        "--status"   => cmd_status(),
+        "--daemon"   => api::run_daemon(),
+        "--api-call" => {
+            let json = args.get(2)
+                .ok_or("--api-call requires a JSON argument, e.g. '{\"cmd\":\"status\"}'")
+                .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
+            api::api_call(json)
+        }
+        path => cmd_deploy(path),
     }
+}
 
-    let local_archive_path = &args[1];
+fn cmd_deploy(archive_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let core_target = "/tmp/centrex_core_root";
     let bootstrapper = bootstrapper::CoreBootstrapper::new(core_target);
 
     if !Path::new(core_target).exists() {
-        log::info!("Core root absent — deploying from archive: {}", local_archive_path);
-        bootstrapper.extract_local_rootfs(local_archive_path)?;
+        log::info!("Core root absent — deploying from archive: {}", archive_path);
+        bootstrapper.extract_local_rootfs(archive_path)?;
         bootstrapper.finalize_core_layout()?;
         log::info!("Core deployed to: {}", core_target);
     } else {
@@ -42,12 +55,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
     let core_root = "/tmp/centrex_core_root";
-    let store = "/opt/centrex_store";
+    let store     = "/opt/centrex_store";
+    let socket    = api::SOCKET_PATH;
 
     println!("Centrex Core Status");
     println!("===================");
-    println!("Core root:    {} {}", core_root, if Path::new(core_root).exists() { "[present]" } else { "[absent]" });
-    println!("Package store: {} {}", store, if Path::new(store).exists() { "[present]" } else { "[absent]" });
+    println!("Core root:    {} {}", core_root,
+        if Path::new(core_root).exists() { "[present]" } else { "[absent]" });
+    println!("Package store: {} {}", store,
+        if Path::new(store).exists() { "[present]" } else { "[absent]" });
+    println!("API socket:   {} {}", socket,
+        if Path::new(socket).exists() { "[running]" } else { "[not running]" });
 
     let os_release = Path::new(core_root).join("etc/os-release");
     if os_release.exists() {
